@@ -88,10 +88,10 @@ original copyright:
 #include <getopt.h>
 
 /* uncomment this for an instruction trace and other debug outputs */
-#if 0
+#if 1
 #define DEBUG_OUTPUT
 #endif
-#if 0
+#if 1
 #define DEBUG_EXTRA
 #endif
 
@@ -1090,6 +1090,7 @@ void execute_instruction()
     int32_t imm, cond, err;
     uint32_t addr, val=0, val2;
 
+    int imm5, cnt;
     uint16_t midpart;
 
     if(insn_type == INSN){
@@ -2316,9 +2317,226 @@ void execute_instruction()
         }
         break;
     case 2:
+	funct3 = (insn >> 13) & 0x07;
+        if(funct3>0b100){
+            imm = (insn >> 8) & 0x3f;
+            rs2 = (insn >> 3) & 0x1f;
+        }else if(funct3==0b100){
+            rs2 = (insn >> 3) & 0x1f;
+            rd = (insn >> 8) & 0x1f;
+            imm5 = (insn >> 13) & 0x01;
+        }else{
+            imm = (insn >> 3) & 0x1f;
+            rd = (insn >> 8) & 0x1f;
+            imm5 = (insn >> 13) & 0x01;
+        }
         funct3 = (insn >> 13) & 0x7;
         midpart = (insn >> 2) & 0x07ff;
         switch(funct3){
+	case 0:
+	    if(XLEN != 32){//slli64=rd shift left 64
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> SLLI64\n");
+            stats[24]++;
+#endif
+                val = (int32_t)(reg[rd] << 64);
+                break;
+            }else{
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> SLLI\n");
+#endif
+	    imm = imm5 << 5 | imm;
+	    //val = (int32_t)(reg[rd] << imm);
+	    }
+	    if(rd!=0)reg[rd] = val;
+	break;
+	case 1:
+            if(XLEN==128){//lqsp
+                imm = (imm & 0x10)<<4 | (imm & 0x0f)<<6 | imm5<<5;
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> LW\n");
+            stats[12]++;
+#endif
+//addr = reg[rs1] + imm;
+                //__uint128_t val = 0;
+                uint32_t rval;
+                addr = reg[2] + imm;
+                for(cnt=0; cnt<4; ++cnt){
+                    if (target_read_u32(&rval, addr + 4*cnt)) {
+                        raise_exception(pending_exception, pending_tval);
+                        return;
+                    }
+                    val = val | (int32_t) rval<<(4*cnt);
+                }
+            }else{//fldsp
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> ldsp\n");
+            stats[12]++;
+#endif
+                uint32_t rval;
+                imm = (imm&0x18)<<3 | (imm&0x07)<<6 | imm<<5;
+                addr = reg[2] + imm;
+                if (target_read_u32(&rval, addr)) {
+                    raise_exception(pending_exception, pending_tval);
+                    return;
+                }
+                val = (double) rval;
+            }
+            if (rd != 0)reg[rd] = val;
+            break;
+	/*case 2:
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> lwsp\n");
+            stats[12]++;
+#endif
+            imm = (imm&0b11100)<<2 | (imm&0b11)<<6 | imm5<<5;
+            uint32_t rval;
+            addr = reg[2] + imm;
+            if (target_read_u32(&rval, addr)) {
+                raise_exception(pending_exception, pending_tval);
+                return;
+            }
+            val = (int32_t) rval;
+            if (rd != 0)reg[rd] = val;
+            break;*/
+	case 3:
+            if(XLEN==32){//flwsp
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> flwsp\n");
+            stats[12]++;
+#endif
+                imm = (imm&0b11100)<<2 | (imm&0b11)<<6 | imm5<<5;
+                uint32_t rval;
+                addr = reg[2] + imm;
+                if (target_read_u32(&rval, addr)) {
+                    raise_exception(pending_exception, pending_tval);
+                    return;
+                }
+                val = (float) rval;
+            }else{//ldsp
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> ldsp\n");
+            stats[12]++;
+#endif
+                //__uint64_t val = 0;
+                uint32_t rval;
+                imm = (imm&0b11000)<<3 | (imm&0b111)<<6 | imm5<<5;
+                addr = reg[2] + imm;
+
+                
+                for(cnt=0; cnt<2; ++cnt){
+                    if (target_read_u32(&rval, addr)) {
+                        raise_exception(pending_exception, pending_tval);
+                        return;
+                    }
+                    val = val | (int32_t) rval<<(cnt*32);
+                }
+                val = (int32_t) rval;
+            } 
+            if (rd != 0)reg[rd] = val;
+        break;
+	case 4:
+            if(imm5 == 0){
+                if(imm == 0){//jr
+#ifdef DEBUG_EXTRA
+        //debug_out(">>> JR\n");
+        stats[3]++;
+#endif//jalr x0, rs1, 0
+                    imm = 0;
+                    val = pc + 2;
+                    next_pc = (int32_t)(reg[0] + imm) & ~1;
+                    if (rd != 0)
+                        reg[rd] = val;
+                    if (next_pc > pc)
+                        forward_counter++;
+                    else
+                        backward_counter++;
+                    jump_counter++;
+                    break;
+                }else{//mv
+#ifdef DEBUG_EXTRA
+                //debug_out(">>> mv\n");
+                stats[27]++;
+#endif
+                    reg[rd] = (uint32_t)reg[rs2];
+                    break;
+                }
+            }else{
+                if(rd == 0 && imm == 0){//ebreak;
+#ifdef DEBUG_EXTRA
+                //debug_out(">>> EBREAK\n");
+                stats[40]++;
+#endif
+                    if (insn & 0x000fff80) {
+                        raise_exception(CAUSE_ILLEGAL_INSTRUCTION, insn);
+                        return;
+                    }
+                    raise_exception(CAUSE_BREAKPOINT, 0);
+                    return;
+                }else if(imm == 0){//jalr
+#ifdef DEBUG_EXTRA
+        //debug_out(">>> JALR\n");
+        stats[3]++;
+#endif//jalr x1, rs1, 0
+                    imm = 0;
+                    val = pc + 2;
+                    next_pc = (int32_t)(reg[rs2]) & ~1;
+                    if (rd != 0)
+                        reg[rd] = val;
+                    if (next_pc > pc)
+                        forward_counter++;
+                    else
+                        backward_counter++;
+                    jump_counter++;
+                    break;
+                }else{//add
+#ifdef DEBUG_EXTRA
+                //debug_out(">>> ADD\n");
+                stats[27]++;
+#endif
+		val = (int64_t)(reg[rd] + reg[rs2]);
+		if(reg[rd]&0x8000 & reg[rs2]&0x8000)val = 0xffff;
+                }
+            }
+            if (rd != 0) reg[rd] = val;
+        break;
+        case 5:
+            if(XLEN == 128){//sqsp
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> sqsp\n");
+            stats[12]++;
+#endif//sq rs2, offset[9:4](x2)
+                imm = (imm&0b111000)<<3 | (imm&0b111)<<6;
+                val = reg[rs2];
+                addr = reg[2] + imm;
+                if (target_write_u32(addr, val)) {
+                raise_exception(pending_exception, pending_tval);
+                return;
+                }
+            }else{//fsdsp
+                if(XLEN==32){
+                    imm = (imm & 0b111000)<<3 | (imm & 0x07)<<6;
+                    //fsd rs2, offset[8:3](x2).
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> fsdsp\n");
+            stats[12]++;
+#endif
+                    //__uint64_t val64 = 0;
+                    uint32_t rval;
+                    addr = reg[2] + imm;
+                    
+                    for(cnt=0; cnt<2; ++cnt){
+                        if (target_read_u32(&rval, addr + 4*cnt)) {
+                            raise_exception(pending_exception, pending_tval);
+                            return;
+                        }
+                        val = val | (int32_t) rval<<(4*cnt);
+                    }
+                    val = (double)val;
+                }
+            }
+            if (rd != 0) reg[rd] = val;
+            break;	
         case 6:
 #ifdef DEBUG_EXTRA
             dprintf(">>> C.SWSP\n");
@@ -2334,6 +2552,37 @@ void execute_instruction()
                 return;
             }
             break;
+	case 7:
+            if(XLEN == 32){//fswsp
+#ifdef DEBUG_EXTRA
+            //debug_out(">>> FSWSP\n");
+            stats[17]++;
+#endif//fsw rs2, offset[7:2](x2)
+                imm = (imm & 0x0f)<<2 | (imm & 0x30)<<6;
+                addr = imm;
+                val = reg[rs2];
+                if (target_write_u32(addr, val)) {
+                    raise_exception(pending_exception, pending_tval);
+                    return;
+                }
+                break;
+            }else{//sdsp
+                imm = (imm & 0x07)<<3 | (imm & 0b111000)<<6;
+                addr = reg[2] + imm;
+                val = reg[rs2];
+                if(XLEN==64 || XLEN==128){
+                    //sd rs2, offset[8:3](x2)
+                    if (target_write_u32(addr, reg[rs2])) {
+                        raise_exception(pending_exception, pending_tval);
+                        return;
+                    }
+                    if (target_write_u32(addr+4, *(&reg[rs2]+1))) {
+                        raise_exception(pending_exception, pending_tval);
+                        return;
+                    }
+                }
+            }
+	break;
         }
         break;
 
